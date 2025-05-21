@@ -1,0 +1,136 @@
+from selenium import webdriver #Control chrome brower programmatically
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import pandas as pd
+import mysql.connector
+import os
+
+#Specify path to the chrome driver. Necessary for Selenium to control chrome.
+#Initialize new chrome browser winder
+service = Service('/usr/local/bin/chromedriver')
+driver = webdriver.Chrome(service=service)
+
+#Define webpage I want to get stats from and directs chrome driver to open that page
+url = 'https://www.achahockey.org/stats/goalie-stats/747/46?qualified=all&conference=10&division=-1&playertype=goalie&rookie=no&sort=wins&statstype=standard&page=1&league=1'
+driver.get(url)
+
+#wait up to 10 seconds for window to pop up until elements show up
+#ensure one element shows up
+#use CSS selector to gather a tags inside the table builder with href that points to stats per player
+WebDriverWait(driver, 10).until(
+    EC.presence_of_element_located((By.CSS_SELECTOR, 'table-builder a[href^="/stats/player"]'))
+)
+
+#Finds all the elememts and returns all matching elements.
+players = driver.find_elements(By.CSS_SELECTOR, 'table-builder a[href^="/stats/player"]')
+
+#initialize empty list to store extracted data
+player_data = []
+
+#extracts each player name in table, gets the parents row, and exracts the columns from the row
+for player in players:
+    playerName = player.text.strip()
+    player_row = player.find_element(By.XPATH, './ancestor::tr')
+    columns = player_row.find_elements(By.TAG_NAME, 'td')
+
+    try:
+        JerseyNumber = columns[1].text.strip()
+        if not JerseyNumber:
+            print(f"Skipping player {playerName}, missing jersey number.")
+            continue
+        playerName = playerName.strip()
+        GP = columns[6].text.strip()
+        W = columns[7].text.strip()
+        L = columns[8].text.strip()
+        OTL = columns[9].text.strip()
+        SOL = columns[10].text.strip()
+        T = columns[11].text.strip()
+        GA = columns[12].text.strip()
+        GAA = columns[13].text.strip()
+        SVS = columns[14].text.strip()
+        SVP = columns[15].text.strip()
+        SO = columns[16].text.strip()
+        Min = columns[17].text.strip()
+
+
+        player_data.append({
+            'JerseyNumber': JerseyNumber,
+           'playerName': playerName,
+            'GP': GP,
+            'W': W,
+            'L': L,
+            'OTL': OTL,
+            'SOL': SOL,
+            'T': T,
+            'GA': GA,
+            'GAA': GAA,
+            'SVS': SVS,
+            'SVP': SVP,
+            'SO': SO,
+            'Min': Min,
+        })
+    except IndexError:
+        print(f"Skipping player {playerName}, row structure might have changed.")
+
+
+
+player_dataframe = pd.DataFrame(player_data)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 1000)
+
+
+# Convert specific columns to the required data types
+player_dataframe['JerseyNumber'] = pd.to_numeric(player_dataframe['JerseyNumber'], errors='coerce', downcast='integer')
+player_dataframe['GP'] = pd.to_numeric(player_dataframe['GP'], errors='coerce', downcast='integer')
+player_dataframe['W'] = pd.to_numeric(player_dataframe['W'], errors='coerce', downcast='integer')
+player_dataframe['L'] = pd.to_numeric(player_dataframe['L'], errors='coerce', downcast='integer')
+player_dataframe['OTL'] = pd.to_numeric(player_dataframe['OTL'], errors='coerce', downcast='integer')
+player_dataframe['SOL'] = pd.to_numeric(player_dataframe['SOL'], errors='coerce', downcast='integer')
+player_dataframe['T'] = pd.to_numeric(player_dataframe['T'], errors='coerce', downcast='integer')
+player_dataframe['GA'] = pd.to_numeric(player_dataframe['GA'] , errors='coerce', downcast='integer')
+player_dataframe['GAA'] = pd.to_numeric(player_dataframe['GAA'] , errors='coerce', downcast='float')
+player_dataframe['SVS'] = pd.to_numeric(player_dataframe['SVS'] , errors='coerce', downcast='integer')
+player_dataframe['SVP'] = pd.to_numeric(player_dataframe['SVP'] , errors='coerce', downcast='float')
+player_dataframe['SO'] = pd.to_numeric(player_dataframe['SO'] , errors='coerce', downcast='integer')
+player_dataframe['Min'] = pd.to_numeric(player_dataframe['Min'] , errors='coerce', downcast='integer')
+# Convert 'playerName' and 'Position' to strings (ensure any missing values are handled)
+player_dataframe['playerName'] = player_dataframe['playerName'].astype(str)
+player_dataframe = player_dataframe.where(pd.notna(player_dataframe), None)
+player_data = [tuple(row) for row in player_dataframe.to_numpy()]
+
+
+print(player_dataframe)
+print(player_dataframe.dtypes)
+
+mydb = mysql.connector.connect(
+    host="localhost",
+    user="ckacz29",
+    passwd="Connor101!",
+    database="lmu_hockey_stats",
+)
+
+mycursor = mydb.cursor()
+
+insert_query = """
+    INSERT INTO current_season_goalie_stats_d3
+    (jerseyNumber, playerName, GP, W, L, OTL, SOL, T, GA, GAA, SVS, SVP, SO, Min) 
+    VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON DUPLICATE KEY UPDATE 
+    GP=VALUES(GP), W=VALUES(W), L=VALUES(L), 
+    OTL=VALUES(OTL), T=VALUES(T), GA=VALUES(GA), GAA=VALUES(GAA), SVS=VALUES(SVS), SVP=VALUES(SVP), SO=VALUES(SO), Min=VALUES(Min);
+"""
+
+try:
+    mycursor.executemany(insert_query, player_data)  # Efficient batch insert
+    mydb.commit()
+    print(f"{mycursor.rowcount} records inserted successfully.")
+except mysql.connector.Error as err:
+    print(f"Error: {err}")
+    mydb.rollback()  # Rollback in case of failure
+finally:
+    mycursor.close()
+    mydb.close()
+
+driver.quit()
