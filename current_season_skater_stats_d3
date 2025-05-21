@@ -1,0 +1,119 @@
+from selenium import webdriver #Control chrome brower programmatically
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import pandas as pd
+import mysql.connector
+import os
+
+#Specify path to the chrome driver. Necessary for Selenium to control chrome.
+#Initialize new chrome browser winder
+service = Service('/usr/local/bin/chromedriver')
+driver = webdriver.Chrome(service=service)
+
+#Define webpage I want to get stats from and directs chrome driver to open that page
+url = 'https://www.achahockey.org/stats/player-stats/747/46?conference=10&division=-1&playertype=skater&position=skaters&rookie=no&sort=points&statstype=standard&page=1&league=1'
+driver.get(url)
+
+#wait up to 10 seconds for window to pop up until elements show up
+#ensure one element shows up
+#use CSS selector to gather a tags inside the table builder with href that points to stats per player
+WebDriverWait(driver, 10).until(
+    EC.presence_of_element_located((By.CSS_SELECTOR, 'table-builder a[href^="/stats/player"]'))
+)
+
+#Finds all the elememts and returns all matching elements.
+players = driver.find_elements(By.CSS_SELECTOR, 'table-builder a[href^="/stats/player"]')
+
+#initialize empty list to store extracted data
+player_data = []
+
+#extracts each player name in table, gets the parents row, and exracts the columns from the row
+for player in players:
+    playerName = player.text.strip()
+    player_row = player.find_element(By.XPATH, './ancestor::tr')
+    columns = player_row.find_elements(By.TAG_NAME, 'td')
+
+    try:
+        JerseyNumber = columns[1].text.strip()
+        playerName = playerName.strip()
+        Position = columns[4].text.strip()
+        GP = columns[7].text.strip()
+        Goals = columns[8].text.strip()
+        Assists = columns[9].text.strip()
+        Points = columns[10].text.strip()
+        PPG = columns[11].text.strip()
+        PIM = columns[16].text.strip()
+
+
+        player_data.append({
+            'JerseyNumber': JerseyNumber,
+           'playerName': playerName,
+            'Position': Position,
+            'GP': GP,
+            'Goals': Goals,
+            'Assists': Assists,
+            'Points': Points,
+            'PPG': PPG,
+            'PIM': PIM,
+        })
+    except IndexError:
+        print(f"Skipping player {playerName}, row structure might have changed.")
+
+
+
+player_dataframe = pd.DataFrame(player_data)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 1000)
+player_dataframe = player_dataframe[player_dataframe['Position'] != 'G']
+
+# Convert specific columns to the required data types
+player_dataframe['JerseyNumber'] = pd.to_numeric(player_dataframe['JerseyNumber'], errors='coerce', downcast='integer')
+player_dataframe['GP'] = pd.to_numeric(player_dataframe['GP'], errors='coerce', downcast='integer')
+player_dataframe['Goals'] = pd.to_numeric(player_dataframe['Goals'], errors='coerce', downcast='integer')
+player_dataframe['Points'] = pd.to_numeric(player_dataframe['Points'], errors='coerce', downcast='integer')
+player_dataframe['Assists'] = pd.to_numeric(player_dataframe['Assists'], errors='coerce', downcast='integer')
+player_dataframe['PIM'] = pd.to_numeric(player_dataframe['PIM'], errors='coerce', downcast='integer')
+player_dataframe['PPG'] = pd.to_numeric(player_dataframe['PPG'], errors='coerce', downcast='float')
+
+# Convert 'playerName' and 'Position' to strings (ensure any missing values are handled)
+player_dataframe['playerName'] = player_dataframe['playerName'].astype(str)
+player_dataframe['Position'] = player_dataframe['Position'].astype(str)
+
+
+player_data = [tuple(row) for row in player_dataframe.to_numpy()]
+print(player_data)
+print(player_dataframe.dtypes)
+
+
+mydb = mysql.connector.connect(
+    host="localhost",
+    user="ckacz29",
+    passwd="Connor101!",
+    database="lmu_hockey_stats",
+)
+
+mycursor = mydb.cursor()
+
+insert_query = """
+    INSERT INTO current_season_skater_stats_d3
+    (jerseyNumber, playerName, Position, GP, Goals, Assists, Points, PPG, PIMS) 
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON DUPLICATE KEY UPDATE 
+    Goals=VALUES(Goals), Assists=VALUES(Assists), Points=VALUES(Points), 
+    PPG=VALUES(PPG), PIMS=VALUES(PIMS);
+"""
+
+try:
+    mycursor.executemany(insert_query, player_data)  # Efficient batch insert
+    mydb.commit()
+    print(f"{mycursor.rowcount} records inserted successfully.")
+except mysql.connector.Error as err:
+    print(f"Error: {err}")
+    mydb.rollback()  # Rollback in case of failure
+finally:
+    mycursor.close()
+    mydb.close()
+
+driver.quit()
